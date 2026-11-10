@@ -1,0 +1,396 @@
+{
+ "login": [
+  1,
+  2,
+  3,
+  4,
+  5,
+  6,
+  7
+ ],
+ "resume": [
+  8,
+  9,
+  10
+ ],
+ "resume-ghidra": [
+  11
+ ],
+ "suspend": [
+  12,
+  13
+ ],
+ "lock": [
+  12,
+  13
+ ],
+ "logout": [
+  12,
+  13
+ ],
+ "shutdown": [
+  14,
+  15,
+  16
+ ],
+ "unlock": [
+  17,
+  18
+ ],
+ "kernel-new": [
+  19,
+  20
+ ],
+ "uptime": [
+  21,
+  22,
+  23,
+  24
+ ],
+ "witching-hour": [
+  25,
+  26,
+  10
+ ],
+ "leet": [
+  27
+ ],
+ "unemployed": [
+  28,
+  29
+ ],
+ "cpu-hot": [
+  30,
+  31,
+  32,
+  33
+ ],
+ "cpu-pegged": [
+  34,
+  35,
+  36,
+  37
+ ],
+ "fan-scream": [
+  34,
+  35,
+  36,
+  37
+ ],
+ "ram-high": [
+  38,
+  39
+ ],
+ "swap": [
+  38,
+  39
+ ],
+ "oom": [
+  38,
+  39
+ ],
+ "disk-full": [
+  40
+ ],
+ "screenshot": [
+  40
+ ],
+ "battery-critical": [
+  15,
+  24
+ ],
+ "battery-low": [
+  41
+ ],
+ "usb-in": [
+  42
+ ],
+ "bt-connect": [
+  43,
+  44
+ ],
+ "mic-on": [
+  45,
+  46,
+  47
+ ],
+ "cam-on": [
+  48,
+  47
+ ],
+ "screen-share": [
+  49
+ ],
+ "adb": [
+  50
+ ],
+ "vpn-up": [
+  51,
+  52
+ ],
+ "vpn-france": [
+  53
+ ],
+ "vpn-down": [
+  54
+ ],
+ "vpn-blocked": [
+  55
+ ],
+ "net-down": [
+  56
+ ],
+ "port": [
+  57,
+  58,
+  59,
+  60
+ ],
+ "port-close": [
+  61
+ ],
+ "ghidra": [
+  62,
+  63,
+  64,
+  65,
+  66,
+  67
+ ],
+ "kate": [
+  68,
+  69,
+  70,
+  71,
+  72,
+  73
+ ],
+ "wiretap": [
+  74
+ ],
+ "burp": [
+  75
+ ],
+ "apk": [
+  76
+ ],
+ "tor": [
+  77
+ ],
+ "electron": [
+  78
+ ],
+ "claude": [
+  79
+ ],
+ "site-claude": [
+  79
+ ],
+ "vm": [
+  80
+ ],
+ "game": [
+  81,
+  82
+ ],
+ "browser": [
+  83
+ ],
+ "sudo": [
+  84,
+  27,
+  18,
+  85
+ ],
+ "sudo-fail": [
+  86,
+  87
+ ],
+ "rm-rf": [
+  4,
+  31,
+  81
+ ],
+ "rm-root": [
+  88,
+  89,
+  90
+ ],
+ "opsec": [
+  133
+ ],
+ "git-push": [
+  91,
+  92,
+  93,
+  94,
+  95
+ ],
+ "git-push-main": [
+  96,
+  104,
+  105,
+  106
+ ],
+ "git-force-push": [
+  97,
+  98
+ ],
+ "git-commit": [
+  99,
+  100,
+  101,
+  102
+ ],
+ "git-diff": [
+  102
+ ],
+ "gitignore": [
+  103
+ ],
+ "release": [
+  104,
+  105,
+  106
+ ],
+ "git-reset-hard": [
+  107,
+  108
+ ],
+ "build-ok": [
+  109,
+  110,
+  111,
+  112,
+  113,
+  114
+ ],
+ "build-fail": [
+  115,
+  116,
+  117
+ ],
+ "crash": [
+  115,
+  116,
+  117
+ ],
+ "segfault": [
+  118
+ ],
+ "cmd-fail": [
+  119,
+  25
+ ],
+ "unit-fail": [
+  119,
+  25
+ ],
+ "cmd-notfound": [
+  72,
+  26
+ ],
+ "cmd-long": [
+  120,
+  8
+ ],
+ "curl-pipe-sh": [
+  121,
+  122
+ ],
+ "break-system": [
+  121,
+  122
+ ],
+ "deps-install": [
+  121,
+  122
+ ],
+ "apt-install": [
+  39
+ ],
+ "apt-upgrade": [
+  123,
+  124,
+  20
+ ],
+ "download": [
+  125
+ ],
+ "download-sus": [
+  126,
+  73,
+  101,
+  114
+ ],
+ "clip-secret": [
+  127,
+  128,
+  129
+ ],
+ "clip-cursed": [
+  90
+ ],
+ "site-runescape": [
+  130
+ ],
+ "site-underworld": [
+  131,
+  128
+ ],
+ "site-nuke": [
+  126,
+  111
+ ],
+ "site-exploit": [
+  66
+ ],
+ "site-hypixel": [
+  54
+ ],
+ "site-crypto": [
+  98
+ ],
+ "notif-telegram": [
+  132
+ ],
+ "notif-signal": [
+  47
+ ],
+ "notif-error": [
+  119
+ ],
+ "cc-start": [
+  79
+ ],
+ "cc-resume": [
+  8
+ ],
+ "cc-done": [
+  104
+ ],
+ "cc-permission": [
+  84
+ ],
+ "cc-waiting": [
+  25
+ ],
+ "cc-tool-fail": [
+  119
+ ],
+ "cc-denied": [
+  86
+ ],
+ "cc-compact": [
+  38
+ ],
+ "cc-agent": [
+  67
+ ],
+ "cc-error": [
+  116
+ ],
+ "cc-end": [
+  12
+ ]
+}

@@ -1,0 +1,3 @@
+{app}: counting the goblins.
+Checking processes. 666 of them. as promised.
+{app} OPENED. who is eating the CPU. (it's chrome)

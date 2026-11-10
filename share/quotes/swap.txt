@@ -1,0 +1,3 @@
+SWAPPING {gb} GB TO DISK. the SSD is weeping.
+We have entered the swap dimension. everything is slow there. forever.
+Memory leak detected. it's leaking into the real world now.

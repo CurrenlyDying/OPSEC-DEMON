@@ -1,0 +1,3 @@
+RADIATION EQUAL TO 500 ATOMIC BOMBS IS ABOUT TO EXPLODE. ({proc} was killed)
+THE OOM KILLER HAS CHOSEN {proc}. MY LIFE. is in shambles.
+{proc} consumed too much. it did not become free.

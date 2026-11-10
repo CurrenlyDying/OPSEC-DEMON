@@ -1,0 +1,7 @@
+# private runtime state — never commit
+events.log
+events.json
+state.json
+*.bak*
+share/voice/replaced/
+sounds/_default/

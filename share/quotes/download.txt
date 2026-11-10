@@ -1,0 +1,4 @@
+{file} ACQUIRED.
+DOWNLOADED: {file}. scanning for nukes... none found. (disappointing)
+New file in Downloads. it will live there forever, like the others.
+{file}: added to the hoard.

@@ -1,0 +1,5 @@
+What the fuck. ({proc} crashed)
+aliens have died. specifically {proc}.
+{proc} SEGFAULTED. open the core dump in ghidra. coward.
+DARK MAGIC INCARNATE has claimed {proc}.
+{proc} dumped core. it saw something it shouldn't have.

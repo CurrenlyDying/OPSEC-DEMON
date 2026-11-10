@@ -1,0 +1,4 @@
+WILL THIS MAN OVERCOME THE FORCES OF EVIL OR BE CONSUMED BY THE SHADOWS? ({cmd} finished after {mins} min)
+I ALWAYS COME BACK. — {cmd}, after {mins} minutes.
+{cmd} IS DONE. go check. stop scrolling.
+{mins} minutes later... the ritual is complete.

@@ -1,0 +1,4 @@
+I HAVE CONSUMED. NOW I WILL BECOME FREE. (+{pkgs})
+INSTALLED: {pkgs}. the system grows stronger.
+{n} packages acquired. still no `opsec` though.
+New capabilities unlocked: {pkgs}.

@@ -1,0 +1,1212 @@
+#!/usr/bin/env python3
+"""
+nemo — the POINT NEMO event engine.
+
+  nemo daemon                  run every watcher (started by systemd: point-nemo.service)
+  nemo emit EVENT [k=v ...]    fire an event (respects cooldown / mute)
+  nemo test EVENT [k=v ...]    fire an event ignoring cooldown / mute
+  nemo list                    every event: popup?, cooldown, custom sounds, quote count
+  nemo mute [MINUTES]          silence everything (default 60 min)   |  nemo unmute
+  nemo log                     follow the event log
+
+Sound lookup:  sounds/<event>/*  ->  sounds/<family>/*  ->  sounds/_default/*
+Quote lookup:  quotes/<event>.txt -> quotes/<family>.txt -> quotes/_chaos.txt
+  (family = event name up to the first '-', e.g. git-push -> git, notif-signal -> notif)
+Per-event switches: ~/.config/point-nemo/events.json  (popup / sound / cooldown / enabled)
+"""
+import fcntl, html, json, os, random, re, shutil, signal, socket, subprocess, sys, threading, time
+from pathlib import Path
+
+HOME = Path.home()
+SHARE = HOME / ".local/share/point-nemo"
+QUOTES, SOUNDS = SHARE / "quotes", SHARE / "sounds"
+CONF = HOME / ".config/point-nemo/events.json"
+RUN = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "point-nemo"
+STATE, MUTE = RUN / "state.json", RUN / "mute-until"
+LOG = HOME / ".local/state/point-nemo/events.log"
+ICON = HOME / ".local/share/icons/magician-ghidra.png"
+AUDIO = (".mp3", ".wav", ".ogg", ".oga", ".flac", ".opus")
+DEVNULL = subprocess.DEVNULL
+
+# event: (popup title, show popup?, cooldown seconds)
+EVENTS = {
+    # session / power
+    "login": ("WELCOME TO POINT NEMO", 1, 0), "logout": ("LOGGING OUT OF THE MATRIX", 0, 0),
+    "shutdown": ("POWERING DOWN THE REACTOR", 0, 0), "suspend": ("GOING DARK", 0, 0),
+    "resume": ("RESURRECTED FROM SLEEP", 1, 0), "lock": ("SESSION SEALED", 0, 5),
+    "unlock": ("SESSION UNSEALED", 1, 10), "afk-return": ("YOU WERE GONE {mins} MINUTES", 1, 60),
+    "uptime": ("UPTIME: {hours}h", 1, 0),
+    "ac-on": ("REACTOR CONNECTED ({pct}%)", 1, 30), "ac-off": ("OFF THE GRID ({pct}%)", 1, 30),
+    "battery-low": ("BATTERY {pct}%", 1, 60), "battery-critical": ("BATTERY {pct}% — FINAL HOURS", 1, 60),
+    "battery-full": ("BATTERY FULLY RADIOACTIVE", 1, 3600),
+    # resources
+    "cpu-hot": ("CPU AT {temp}°C", 1, 900), "cpu-pegged": ("LOAD {load} ON {cores} CORES", 1, 900),
+    "ram-high": ("RAM {pct}% CONSUMED", 1, 900), "swap": ("SWAPPING {gb} GB", 1, 1800),
+    "disk-full": ("{mount} IS {pct}% FULL", 1, 3600), "fan-scream": ("FAN AT {rpm} RPM", 1, 1800),
+    "procs-666": ("{n} PROCESSES ALIVE", 1, 600),
+    # clock
+    "midnight": ("00:00", 1, 60), "witching-hour": ("03:00 — WITCHING HOUR", 1, 60), "333": ("03:33", 1, 60),
+    "420": ("{time}", 1, 60), "leet": ("13:37", 1, 60), "six-six-six": ("06:66", 1, 60),
+    "friday-13": ("FRIDAY THE 13TH", 1, 3600),
+    # hardware
+    "usb-in": ("DEVICE INSERTED: {device}", 1, 3), "usb-out": ("DEVICE REMOVED: {device}", 1, 3),
+    "usb-yubikey": ("HARDWARE KEY: {device}", 1, 10), "bt-connect": ("BLUETOOTH: {device}", 1, 10),
+    "bt-disconnect": ("BLUETOOTH LOST: {device}", 1, 10), "audio-switch": ("AUDIO → {device}", 1, 5),
+    "monitor-change": ("DISPLAY TOPOLOGY CHANGED", 1, 15), "mic-on": ("MICROPHONE OPENED BY {app}", 1, 30),
+    "cam-on": ("CAMERA OPENED BY {app}", 1, 30), "screenshot": ("SCREENSHOT CAPTURED", 1, 3),
+    # network
+    "net-up": ("ONLINE: {ssid}", 1, 30), "net-down": ("OFFLINE", 1, 30),
+    "net-portal": ("CAPTIVE PORTAL: {ssid}", 1, 60), "vpn-up": ("MULLVAD: {location}", 1, 30),
+    "vpn-down": ("MULLVAD DISCONNECTED", 1, 30), "vpn-blocked": ("MULLVAD BLOCKING TRAFFIC", 1, 60),
+    "port": ("NEW LISTENER ON :{port}", 1, 0), "ssh-in": ("SSH LOGIN: {user}@{ip}", 1, 10),
+    "ssh-bruteforce": ("SSH BRUTEFORCE FROM {ip}", 1, 300),
+    # apps
+    "ghidra": ("MAGICIAN-Ghidra AWAKENS", 1, 60), "ghidra-close": ("GHIDRA CLOSED", 1, 10),
+    "kate": ("KATE OPENED", 1, 10), "kate-close": ("KATE CLOSED", 1, 10),
+    "hacktool": ("{app} LAUNCHED", 1, 30), "browser": ("{app} OPENED", 1, 30), "chat": ("{app} OPENED", 1, 30),
+    "tor": ("TOR ONLINE ({app})", 1, 60), "claude": ("CLAUDE SUMMONED", 1, 60),
+    "editor": ("{app} OPENED", 1, 30), "vm": ("VIRTUAL MACHINE: {app}", 1, 30),
+    "monitor-app": ("{app} OPENED", 1, 60), "vault": ("{app} OPENED", 1, 30), "spotify": ("SPOTIFY OPENED", 1, 60),
+    # files / clipboard
+    "download": ("DOWNLOADED: {file}", 1, 5), "download-sus": ("SUSPICIOUS DOWNLOAD: {file}", 1, 5),
+    "clip-secret": ("SECRET IN CLIPBOARD", 1, 30), "clip-shellcode": ("SHELLCODE IN CLIPBOARD", 1, 30),
+    "clip-cursed": ("CURSED COMMAND IN CLIPBOARD", 1, 30),
+    # shell (zsh hook)
+    "cmd-fail": ("{cmd} EXITED {code}", 1, 20), "cmd-notfound": ("{cmd}: COMMAND NOT FOUND", 1, 10),
+    "cmd-long": ("{cmd} FINISHED AFTER {mins} MIN", 1, 10), "sudo": ("ROOT ACCESS GRANTED", 1, 60),
+    "sudo-fail": ("SUDO: WRONG PASSWORD", 1, 5), "rm-rf": ("rm -rf EXECUTED", 1, 10),
+    "git-push": ("PUSHED {repo}", 1, 10), "git-push-fail": ("PUSH REJECTED", 1, 10),
+    "git-force-push": ("FORCE PUSHED", 1, 10), "git-commit": ("COMMITTED TO {repo}", 1, 10),
+    "git-reset-hard": ("git reset --hard", 1, 10), "git-clone": ("REPO CLONED", 1, 10),
+    "git-clone-fail": ("CLONE FAILED", 1, 10), "chmod-777": ("chmod 777", 1, 10),
+    "curl-pipe-sh": ("curl | sh", 1, 10), "break-system": ("--break-system-packages", 1, 10),
+    "kill": ("PROCESS EXECUTED", 1, 10), "ssh-out": ("SSH SESSION ENDED", 1, 30),
+    "ssh-out-fail": ("SSH FAILED", 1, 30), "deps-install": ("DEPENDENCIES INSTALLED", 1, 30),
+    "deps-install-fail": ("DEPENDENCY HELL", 1, 30), "build-ok": ("BUILD SUCCEEDED", 1, 15),
+    "build-fail": ("BUILD FAILED", 1, 15), "hexdump": ("{cmd}", 1, 60),
+    "crypto": ("{cmd}", 1, 60), 
+    # system
+    "apt-install": ("INSTALLED: {pkgs}", 1, 5), "apt-remove": ("REMOVED: {pkgs}", 1, 5),
+    "apt-upgrade": ("{n} PACKAGES UPGRADED", 1, 5), "unit-fail": ("{unit} HAS FALLEN", 1, 0),
+    "crash": ("{proc} CRASHED", 1, 5), "oom": ("OOM KILLER: {proc}", 1, 5),
+    # browsing (Chrome history)
+    "site-runescape": ("RUNESCAPE DETECTED", 1, 1800), "site-tiktok": ("TIKTOK DETECTED", 1, 1800),
+    "site-github": ("GITHUB", 1, 3600), "site-stackoverflow": ("STACK OVERFLOW", 1, 1800),
+    "site-exploit": ("EXPLOIT DATABASE", 1, 1800), "site-underworld": ("UNDERWORLD FORUM", 1, 1800),
+    "site-nuke": ("NUCLEAR SEARCH HISTORY", 1, 1800), "site-pointnemo": ("POINT NEMO", 1, 1800),
+    "site-chatgpt": ("ANOTHER AI DETECTED", 1, 1800), "site-claude": ("CLAUDE.AI", 1, 3600),
+    "site-spotify": ("SPOTIFY WEB", 1, 3600),
+    # voice-pack triggers
+    "resume-ghidra": ("RESURRECTED — GHIDRA STILL OPEN", 1, 0), "kernel-new": ("NEW KERNEL: {kernel}", 1, 0),
+    "unemployed": ("{hour}:00 ON A WEEKDAY", 1, 3600), "screen-share": ("SCREEN SHARING STARTED", 1, 30),
+    "adb": ("{app} ATTACHED", 1, 120), "vpn-france": ("MULLVAD: {location}", 1, 30),
+    "port-close": (":{port} CLOSED", 1, 10), "wiretap": ("{app} SNIFFING", 1, 30),
+    "burp": ("BURP SUITE ONLINE", 1, 60), "apk": ("APK DETECTED: {file}", 1, 10),
+    "electron": ("ELECTRON DETECTED", 1, 60), "game": ("{app} LAUNCHED", 1, 60),
+    "rm-root": ("rm -rf / ATTEMPTED", 1, 0),
+    "opsec": ("E: Unable to locate package opsec", 1, 0), "git-push-main": ("PUSHED TO {branch}", 1, 10),
+    "git-diff": ("git diff", 1, 120), "gitignore": (".gitignore MODIFIED", 1, 30),
+    "release": ("RELEASE SHIPPED", 1, 10), "segfault": ("{cmd}: SEGMENTATION FAULT", 1, 5),
+    "site-hypixel": ("HYPIXEL", 1, 1800),
+    "site-crypto": ("CRYPTO CASINO DETECTED", 1, 1800),
+    # Claude Code hooks (sound only: one fixed clip each, so every sound has one meaning)
+    "cc-start": ("", 0, 5), "cc-resume": ("", 0, 5), "cc-done": ("", 0, 3), "cc-permission": ("", 0, 3),
+    "cc-waiting": ("", 0, 60), "cc-tool-fail": ("", 0, 20), "cc-denied": ("", 0, 10), "cc-compact": ("", 0, 10),
+    "cc-agent": ("", 0, 15), "cc-error": ("", 0, 10), "cc-end": ("", 0, 5),
+    # notifications: sound only (the app already shows its own popup)
+    **{f"notif-{n}": ("", 0, 1) for n in
+       ("signal", "chrome", "claude", "discord", "telegram", "mail", "kde", "error", "other")},
+}
+
+S = {"locked": False, "resume_t": 0.0, "unlock_t": 0.0, "shutting": False}
+
+
+# ───────────────────────── core ─────────────────────────
+class SafeDict(dict):
+    def __missing__(self, k):
+        return "{" + k + "}"
+
+
+_conf = {"mtime": None, "data": {}}
+
+
+def user_conf():
+    try:
+        m = CONF.stat().st_mtime
+        if m != _conf["mtime"]:
+            _conf["data"], _conf["mtime"] = json.loads(CONF.read_text()), m
+    except (OSError, ValueError):
+        pass
+    return _conf["data"]
+
+
+def meta(ev):
+    title, popup, cd = EVENTS.get(ev, (ev.upper(), 1, 5))
+    m = {"title": title, "popup": bool(popup), "sound": True, "cooldown": cd, "enabled": True}
+    m.update(user_conf().get(ev, {}))
+    return m
+
+
+def sync_conf():
+    """Write events.json with every event, keeping the user's edits."""
+    CONF.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        cur = json.loads(CONF.read_text())
+    except (OSError, ValueError):
+        cur = {}
+    for ev, (title, popup, cd) in EVENTS.items():
+        d = cur.setdefault(ev, {})
+        d.setdefault("enabled", True); d.setdefault("popup", bool(popup))
+        d.setdefault("sound", True); d.setdefault("cooldown", cd)
+    CONF.write_text(json.dumps(cur, indent=1, sort_keys=True))
+
+
+def family(ev):
+    return ev.split("-")[0]
+
+
+def pick_sound(ev):
+    for d in (SOUNDS / ev, SOUNDS / family(ev), SOUNDS / "_default"):
+        files = [f for f in d.glob("*") if f.suffix.lower() in AUDIO] if d.is_dir() else []
+        if files:
+            return random.choice(files)
+
+
+VOICE = SHARE / "voice"
+_voice = {"mtime": None, "text": {}}
+
+
+def voice_text(f):
+    """Exact line spoken in a voice-pack clip (from voice/manifest.json), keyed by its 3-digit ID."""
+    try:
+        m = (VOICE / "manifest.json").stat().st_mtime
+        if m != _voice["mtime"]:
+            _voice["text"] = {e["number"]: e["text"] for e in json.loads((VOICE / "manifest.json").read_text())}
+            _voice["mtime"] = m
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return _voice["text"].get(Path(f).name[:3]) if f else None
+
+
+def pick_quote(ev):
+    for f in (QUOTES / f"{ev}.txt", QUOTES / f"{family(ev)}.txt", QUOTES / "_chaos.txt"):
+        try:
+            lines = [l.strip() for l in f.read_text().splitlines() if l.strip() and not l.startswith("#")]
+        except OSError:
+            continue
+        if lines:
+            return random.choice(lines)
+    return ""
+
+
+def claim(ev, cd, force, wants_sound, priority):
+    """Cooldown bookkeeping shared between the daemon and shell-hook processes."""
+    RUN.mkdir(parents=True, exist_ok=True)
+    with open(RUN / "state.lock", "a+") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            st = json.loads(STATE.read_text())
+        except (OSError, ValueError):
+            st = {}
+        now = time.time()
+        if not force and now - st.get(ev, 0) < cd:
+            return None
+        sound_ok = wants_sound and (priority or now - st.get("_sound", 0) > 0.7)
+        st[ev] = now
+        if sound_ok:
+            st["_sound"] = now
+        STATE.write_text(json.dumps(st))
+        return sound_ok
+
+
+_dnd = {"t": 0, "v": False}
+
+
+def is_muted():
+    try:
+        if float(MUTE.read_text()) > time.time():
+            return True
+    except (OSError, ValueError):
+        pass
+    if time.time() - _dnd["t"] > 10:  # KDE "Do Not Disturb"
+        r = subprocess.run(["gdbus", "call", "--session", "--dest", "org.freedesktop.Notifications",
+                            "--object-path", "/org/freedesktop/Notifications", "--method",
+                            "org.freedesktop.DBus.Properties.Get", "org.freedesktop.Notifications", "Inhibited"],
+                           capture_output=True, text=True)
+        _dnd.update(t=time.time(), v="true" in r.stdout)
+    return _dnd["v"]
+
+
+def log(msg):
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG, "a") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
+    except OSError:
+        pass
+
+
+BUS = RUN / "bus.sock"
+
+
+def play(f):
+    """Mix into the always-open "Point Nemo" stream (Applications tab of the volume mixer).
+    Returns a pw-play process only when the audio server is down (quiet fallback)."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        s.sendto(str(f).encode(), str(BUS))
+        s.close()
+        return None
+    except OSError:
+        return subprocess.Popen(["pw-play", "--volume", "0.3", str(f)], stdout=DEVNULL, stderr=DEVNULL,
+                                start_new_session=True)
+
+
+def clip_secs(f):
+    try:
+        return float(sh("ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", str(f)))
+    except ValueError:
+        return 3.0
+
+
+def emit(ev, kv=None, force=False, block=False, priority=False):
+    kv = SafeDict({k: str(v) for k, v in (kv or {}).items()})
+    m = meta(ev)
+    if not m["enabled"]:
+        return
+    sound_ok = claim(ev, m["cooldown"], force, m["sound"], priority or block)
+    if sound_ok is None:
+        return
+    muted = not force and is_muted()
+    log(f"{ev} {' '.join(f'{k}={v}' for k, v in kv.items())}{' [muted]' if muted else ''}")
+    if muted:
+        return
+    players, f = [], None
+    if sound_ok:
+        f = pick_sound(ev)
+        if f:
+            pp = play(f)
+            players.append(pp if pp else clip_secs(f))
+    if m["popup"]:
+        q = voice_text(f) or pick_quote(ev)
+        try:
+            q, title = q.format_map(kv), ("☢ " + m["title"]).format_map(kv)
+        except (ValueError, IndexError):
+            title = "☢ " + m["title"]
+        subprocess.Popen(["notify-send", "-a", "point-nemo", "-i", str(ICON), "-t", "9000",
+                          title, html.escape(q, quote=False)], stdout=DEVNULL, stderr=DEVNULL,
+                         start_new_session=True)
+    if block:
+        for p in players:
+            if isinstance(p, float):
+                time.sleep(min(p + 0.3, 8))
+                continue
+            try:
+                p.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                pass
+
+
+# ───────────────────────── helpers ─────────────────────────
+def stream(cmd):
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=DEVNULL, text=True, bufsize=1)
+    try:
+        yield from p.stdout
+    finally:
+        p.kill()
+
+
+def rd(p):
+    try:
+        return Path(p).read_text().strip()
+    except OSError:
+        return None
+
+
+def sh(*cmd):
+    return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+
+
+def just_resumed(window=20):
+    return time.time() - S["resume_t"] < window
+
+
+# ───────────────────────── watchers ─────────────────────────
+NOTIF_ROUTES = [("signal", r"signal"), ("chrome", r"chrom|google"), ("claude", r"claude"),
+                ("discord", r"discord|vesktop"), ("telegram", r"telegram"),
+                ("mail", r"thunderbird|kmail|evolution|mail"),
+                ("kde", r"plasma|kde|powerdevil|networkmanager|spectacle|dolphin|discover|kwin|bluedevil|kded|kdeconnect")]
+
+
+def w_notifications():
+    strs, pending = [], False
+    for line in stream(["dbus-monitor", "--session",
+                        "type='method_call',interface='org.freedesktop.Notifications',member='Notify'"]):
+        if "member=Notify" in line:
+            strs, pending = [], True
+            continue
+        s = line.strip()
+        if pending and s.startswith("string "):
+            strs.append(s[7:].strip('"'))
+            if len(strs) == 3:  # app_name, icon, summary
+                pending = False
+                app, summary = strs[0].lower(), strs[2]
+                if app == "point-nemo":
+                    continue
+                if re.search(r"\b(fail|error|crash|denied|unable)", summary, re.I):
+                    emit("notif-error", {"app": strs[0]})
+                    continue
+                name = next((n for n, rx in NOTIF_ROUTES if re.search(rx, app)), "other")
+                emit(f"notif-{name}", {"app": strs[0]})
+
+
+def ghidra_open():
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            if b"ghidra" in open(f"/proc/{pid}/cmdline", "rb").read().lower():
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def w_logind():
+    inh = [None]
+
+    def take():
+        if inh[0] is None or inh[0].poll() is not None:
+            inh[0] = subprocess.Popen(["systemd-inhibit", "--what=sleep:shutdown", "--mode=delay",
+                                       "--who=Point Nemo", "--why=the doom chime must play", "sleep", "infinity"],
+                                      stdout=DEVNULL, stderr=DEVNULL, start_new_session=True)
+
+    def release():
+        if inh[0] and inh[0].poll() is None:
+            os.killpg(inh[0].pid, signal.SIGTERM)
+        inh[0] = None
+
+    take()
+    try:
+        for line in stream(["gdbus", "monitor", "--system", "--dest", "org.freedesktop.login1"]):
+            if "PrepareForSleep (true" in line:
+                emit("suspend", block=True); release()
+            elif "PrepareForSleep (false" in line:
+                S["resume_t"] = time.time(); take()
+                emit("resume-ghidra" if ghidra_open() else "resume", priority=True)
+            elif "PrepareForShutdown (true" in line:
+                S["shutting"] = True; emit("shutdown", block=True); release()
+    finally:
+        release()
+
+
+def w_screensaver():
+    armed = False
+    for line in stream(["dbus-monitor", "--session",
+                        "type='signal',interface='org.freedesktop.ScreenSaver',member='ActiveChanged'"]):
+        if "member=ActiveChanged" in line:
+            armed = True
+        elif armed and "boolean" in line:
+            armed = False
+            if "true" in line:
+                S["locked"] = True; emit("lock")
+            else:
+                S["locked"], S["unlock_t"] = False, time.time(); emit("unlock")
+
+
+def w_idle():
+    sid = os.environ.get("XDG_SESSION_ID") or next(
+        (l.split()[0] for l in sh("loginctl", "list-sessions", "--no-legend").splitlines()
+         if len(l.split()) > 2 and l.split()[2] == os.environ.get("USER")), None)
+    if not sid:
+        return time.sleep(3600)
+    idle_since = None
+    while True:
+        time.sleep(15)
+        out = dict(l.split("=", 1) for l in sh("loginctl", "show-session", sid, "-p", "IdleHint",
+                                                "-p", "IdleSinceHint").splitlines() if "=" in l)
+        if out.get("IdleHint") == "yes":
+            idle_since = idle_since or int(out.get("IdleSinceHint", "0")) / 1e6 or time.time()
+        elif idle_since:
+            mins = int((time.time() - idle_since) / 60)
+            idle_since = None
+            if mins >= 15 and not S["locked"] and time.time() - S["unlock_t"] > 60:
+                emit("afk-return", {"mins": mins})
+
+
+def w_power():
+    ps = Path("/sys/class/power_supply")
+    ac = next((p for p in ps.iterdir() if rd(p / "type") == "Mains"), None)
+    bat = next((p for p in ps.iterdir() if rd(p / "type") == "Battery"), None)
+    last_ac = rd(ac / "online") if ac else None
+    last_cap = int(rd(bat / "capacity") or 0) if bat else 0
+    last_st = rd(bat / "status") if bat else None
+    while True:
+        time.sleep(10)
+        pct = rd(bat / "capacity") if bat else "?"
+        if ac:
+            a = rd(ac / "online")
+            if a and a != last_ac:
+                last_ac = a
+                emit("ac-on" if a == "1" else "ac-off", {"pct": pct})
+        if bat:
+            cap, st = int(rd(bat / "capacity") or last_cap), rd(bat / "status")
+            if st == "Discharging":
+                for th, ev in ((5, "battery-critical"), (10, "battery-low"), (20, "battery-low")):
+                    if cap <= th < last_cap:
+                        emit(ev, {"pct": cap}); break
+            if st == "Full" and last_st not in (None, "Full"):
+                emit("battery-full")
+            last_cap, last_st = cap, st
+
+
+def cpu_temp():
+    vals = []
+    for h in Path("/sys/class/hwmon").glob("hwmon*"):
+        if rd(h / "name") in ("k10temp", "coretemp", "zenpower", "cpu_thermal"):
+            for t in h.glob("temp*_input"):
+                try:
+                    vals.append(int(t.read_text()) / 1000)
+                except (OSError, ValueError):
+                    pass
+    return max(vals) if vals else None
+
+
+def w_resources():
+    swapped, tick = False, 0
+    while True:
+        time.sleep(10); tick += 1
+        t = cpu_temp()
+        if t and t >= 97:  # this machine idles ~92°C
+
+            emit("cpu-hot", {"temp": int(t)})
+        load, cores = os.getloadavg()[0], os.cpu_count() or 1
+        if load > cores:
+            emit("cpu-pegged", {"load": f"{load:.1f}", "cores": cores})
+        mi = {l.split(":")[0]: int(l.split()[1]) for l in open("/proc/meminfo")}
+        used = 1 - mi["MemAvailable"] / mi["MemTotal"]
+        if used > 0.92:
+            emit("ram-high", {"pct": int(used * 100)})
+        sw = (mi.get("SwapTotal", 0) - mi.get("SwapFree", 0)) / 1048576
+        if sw > 2 and not swapped:
+            emit("swap", {"gb": f"{sw:.1f}"})
+        swapped = sw > 1.5
+        fan = rd("/proc/acpi/ibm/fan")
+        m = re.search(r"speed:\s+(\d+)", fan or "")
+        if m and int(m.group(1)) > 5500:
+            emit("fan-scream", {"rpm": m.group(1)})
+        if tick % 6 == 0:
+            for mnt in ("/", str(HOME)):
+                u = shutil.disk_usage(mnt)
+                if u.used / u.total > 0.92:
+                    emit("disk-full", {"mount": mnt, "pct": int(u.used / u.total * 100)})
+
+
+TIMES = {"00:00": "midnight", "03:00": "witching-hour", "03:33": "333", "04:20": "420",
+         "16:20": "420", "13:37": "leet", "07:06": "six-six-six"}
+
+
+def w_clock():
+    last, period = None, 7 * 3600
+    up = lambda: float(open("/proc/uptime").read().split()[0])
+    mark = int(up() // period)
+    while True:
+        time.sleep(15)
+        now = time.localtime()
+        hm, key = time.strftime("%H:%M", now), time.strftime("%Y%m%d%H%M", now)
+        if hm in TIMES and key != last:
+            last = key
+            fri13 = hm == "00:00" and now.tm_wday == 4 and now.tm_mday == 13
+            emit("friday-13" if fri13 else TIMES[hm], {"time": hm})
+        n = int(up() // period)
+        if n > mark:
+            mark = n
+            emit("uptime", {"hours": n * 7})
+
+
+def w_journal():
+    for line in stream(["journalctl", "-f", "-n", "0", "-o", "json",
+                        "--output-fields=MESSAGE,SYSLOG_IDENTIFIER"]):
+        try:
+            j = json.loads(line)
+        except ValueError:
+            continue
+        msg, ident = j.get("MESSAGE"), j.get("SYSLOG_IDENTIFIER", "")
+        if isinstance(msg, list):
+            msg = bytes(msg).decode(errors="replace")
+        if not isinstance(msg, str):
+            continue
+        if ident == "sudo" and ("incorrect password" in msg or "authentication failure" in msg):
+            emit("sudo-fail")
+        elif ident.startswith("sshd"):
+            m = re.search(r"Accepted \S+ for (\S+) from (\S+)", msg)
+            if m:
+                emit("ssh-in", {"user": m.group(1), "ip": m.group(2)})
+            m = re.search(r"(Failed password|Invalid user).* from (\S+)", msg)
+            if m:
+                emit("ssh-bruteforce", {"ip": m.group(2)})
+        elif ident == "kernel":
+            m = re.search(r"(\S+)\[\d+\]: segfault at", msg)
+            if m:
+                emit("crash", {"proc": m.group(1)})
+            m = re.search(r"Out of memory: Killed process \d+ \((.+?)\)", msg)
+            if m:
+                emit("oom", {"proc": m.group(1)})
+        elif ident == "systemd-coredump":
+            m = re.search(r"Process \d+ \((.+?)\) of user \d+ (dumped core|terminated abnormally)", msg)
+            if m:
+                emit("crash", {"proc": m.group(1)})
+        elif ident == "systemd-oomd" and "Killed" in msg:
+            m = re.search(r"Killed (\S+)", msg)
+            emit("oom", {"proc": m.group(1) if m else "something"})
+
+
+def w_units():
+    def failed():
+        s = set()
+        for scope in ([], ["--user"]):
+            out = sh("systemctl", *scope, "--failed", "--plain", "--no-legend")
+            s |= {l.split()[0] for l in out.splitlines() if l.strip()}
+        return s
+    seen = failed()
+    while True:
+        time.sleep(20)
+        now = failed()
+        for u in sorted(now - seen):
+            emit("unit-fail", {"unit": u})
+        seen = now
+
+
+def w_apt():
+    cur = {}
+    for line in stream(["tail", "-F", "-n", "0", "/var/log/apt/history.log"]):
+        line = line.strip()
+        key = line.split(":", 1)[0]
+        if key == "Commandline":
+            cur["cmd"] = line.split(":", 1)[1].strip()
+        elif key in ("Install", "Remove", "Purge", "Upgrade"):
+            cur[key] = line.count(" (")
+        elif key == "End-Date":
+            words = cur.get("cmd", "").split()
+            pkgs = " ".join(w for w in words[1:] if not w.startswith("-") and w not in
+                            ("install", "remove", "purge", "upgrade", "full-upgrade", "dist-upgrade",
+                             "autoremove", "reinstall"))[:80] or "something"
+            if "Remove" in cur or "Purge" in cur:
+                emit("apt-remove", {"pkgs": pkgs, "n": cur.get("Remove", 0) + cur.get("Purge", 0)})
+            elif "upgrade" in cur.get("cmd", "") and "Upgrade" in cur:
+                emit("apt-upgrade", {"n": cur["Upgrade"]})
+            elif "Install" in cur:
+                emit("apt-install", {"pkgs": pkgs, "n": cur["Install"]})
+            elif "Upgrade" in cur:
+                emit("apt-upgrade", {"n": cur["Upgrade"]})
+            cur = {}
+
+
+C = re.compile
+PROC_RULES = [  # (event, comm regex, cmdline regex or None)
+    ("kate", C(r"^kate$"), None),
+    ("ghidra", C(r"^java$"), C(r"ghidra", re.I)),
+    ("wiretap", C(r"^(wireshark|tshark|tcpdump|dumpcap|termshark)$"), None),
+    ("adb", C(r"^(adb|frida|frida-server|frida-trace|objection|scrcpy)$"), None),
+    ("burp", C(r"^(java|BurpSuite.*|burpsuite.*)$"), C(r"[bB]urp", re.I)),
+    ("game", C(r"^(java)$"), C(r"minecraft|prismlauncher|multimc|tlauncher", re.I)),
+    ("game", C(r"^(steam|hl2_linux|gmod|minecraft-launc|PrismLauncher|prismlauncher|lutris|heroic)$"), None),
+    ("electron", C(r"^electron\d*$"), None),
+    ("hacktool", C(r"^(nmap|masscan|gdb|r2|radare2|rizin|[cC]utter|hashcat|john|msfconsole|ida64|ida|"
+                   r"binwalk|ettercap|aircrack-ng|hydra|bettercap|ltrace|strace|edb|imhex)$"), None),
+    ("hacktool", C(r"^(java|python3?|ruby)$"), C(r"(sqlmap|msfconsole|zaproxy)")),
+    ("tor", C(r"^(tor|firefox\.real)$"), None),
+    ("browser", C(r"^(chrome|chromium|firefox|firefox-esr|brave|librewolf)$"), None),
+    ("chat", C(r"^(signal-desktop|[dD]iscord|telegram-deskto|Telegram|element-deskto|vesktop)"), None),
+    ("claude", C(r"^claude"), None),
+    ("editor", C(r"^(code|codium|nvim|vim|nano|emacs|zed|subl|sublime_text)$"), None),
+    ("vm", C(r"^(qemu-system-|VirtualBoxVM|vmware|gnome-boxes)"), None),
+    ("monitor-app", C(r"^(htop|btop|atop|nvtop|plasma-systemmo|ksysguard)"), None),
+    ("vault", C(r"^(keepassxc|KeePassXC|bitwarden|1password)"), None),
+    ("spotify", C(r"^spotify$"), None),
+]
+CLOSE_EVENTS = {"kate": "kate-close", "ghidra": "ghidra-close"}
+PRETTY = {"hl2_linux": "Garry's Mod", "minecraft-launc": "Minecraft", "chrome": "Chrome", "signal-desktop": "Signal", "telegram-deskto": "Telegram",
+          "plasma-systemmo": "System Monitor", "firefox.real": "Tor Browser"}
+
+
+def w_procs():
+    cmdlines = {}
+
+    def scan():
+        hits, n = {}, 0
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            n += 1
+            comm = rd(f"/proc/{pid}/comm")
+            if not comm:
+                continue
+            for ev, crx, argrx in PROC_RULES:
+                if not crx.search(comm):
+                    continue
+                if argrx:
+                    if pid not in cmdlines:
+                        try:
+                            cmdlines[pid] = open(f"/proc/{pid}/cmdline", "rb").read().decode(errors="replace")
+                        except OSError:
+                            cmdlines[pid] = ""
+                    m = argrx.search(cmdlines[pid])
+                    if not m:
+                        continue
+                    label = {"ghidra": "Ghidra", "burp": "Burp Suite", "game": "Minecraft"}.get(ev, m.group(0))
+                else:
+                    label = PRETTY.get(comm, comm)
+                hits.setdefault(ev, label)
+                break
+        return hits, n
+
+    prev, _ = scan()
+    armed = {666: True, 1666: True, 6666: True}
+    while True:
+        time.sleep(1)
+        if len(cmdlines) > 5000:
+            cmdlines.clear()
+        cur, n = scan()
+        for ev, label in cur.items():
+            if ev not in prev:
+                emit(ev, {"app": label})
+        for ev in prev:
+            if ev not in cur and ev in CLOSE_EVENTS:
+                emit(CLOSE_EVENTS[ev])
+        for th in armed:
+            if n >= th and armed[th]:
+                armed[th] = False
+                emit("procs-666", {"n": n})
+            elif n < th - 60:
+                armed[th] = True
+        prev = cur
+
+
+def w_cam():
+    def users():
+        out = set()
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                for fd in os.scandir(f"/proc/{pid}/fd"):
+                    try:
+                        if os.readlink(fd.path).startswith("/dev/video"):
+                            c = rd(f"/proc/{pid}/comm") or "?"
+                            if c not in ("pipewire", "wireplumber"):
+                                out.add(PRETTY.get(c, c))
+                            break
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+        return out
+    prev = users()
+    while True:
+        time.sleep(4)
+        cur = users()
+        if cur and not prev:
+            emit("cam-on", {"app": ", ".join(sorted(cur))})
+        prev = cur
+
+
+GIT_SKIP = (".cache", ".local/share", ".oh-my-zsh", ".codex/.tmp", ".cargo", ".rustup", "node_modules",
+            ".gradle", ".m2", ".npm", ".var")
+
+
+def git_repos():
+    out = []
+    for root, dirs, _ in os.walk(HOME):
+        rel = os.path.relpath(root, HOME)
+        depth = 0 if rel == "." else rel.count(os.sep) + 1
+        if ".git" in dirs:
+            out.append(Path(root))
+        dirs[:] = [d for d in dirs if d != ".git" and depth < 5 and not d.startswith(("snap",))
+                   and not any(os.path.join(rel, d).lstrip("./").startswith(x) for x in GIT_SKIP)
+                   and not (d.startswith(".") and depth == 0 and d not in (".config",))]
+    return out
+
+
+def git_event(repo, ref, line):
+    try:
+        head, msg = line.split("\t", 1)
+        old, new = head.split()[:2]
+    except ValueError:
+        return None, {}
+    kv = {"repo": repo.name}
+    if ref == "HEAD":
+        if msg.startswith("commit"):
+            return "git-commit", kv
+        if msg.startswith("reset: moving to"):
+            return "git-reset-hard", kv
+        return None, kv
+    if "update by push" in msg:  # refs/remotes/<remote>/<branch>
+        branch = ref.rsplit("/", 1)[-1]
+        kv["branch"] = branch
+        if set(old) != {"0"} and subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", old, new],
+                                                stdout=DEVNULL, stderr=DEVNULL).returncode == 1:
+            return "git-force-push", kv
+        return ("git-push-main" if branch in ("main", "master") else "git-push"), kv
+    return None, kv
+
+
+def w_git():
+    sizes, ign, last_scan, repos = {}, {}, 0, []
+
+    def logs(r):
+        base = r / ".git/logs"
+        yield "HEAD", base / "HEAD"
+        rem = base / "refs/remotes"
+        if rem.is_dir():
+            for f in rem.rglob("*"):
+                if f.is_file():
+                    yield str(f.relative_to(base)), f
+
+    known = set()
+    while True:
+        if time.time() - last_scan > 600:
+            repos, last_scan = git_repos(), time.time()
+        for r in repos:
+            for ref, f in logs(r):
+                try:
+                    size = f.stat().st_size
+                except OSError:
+                    continue
+                prev = sizes.get(f, 0 if r in known else None)  # new branch in a known repo: read it all
+                sizes[f] = size
+                if prev is None or size <= prev:  # newly discovered repo: just learn it
+                    continue
+                with open(f, errors="replace") as fh:
+                    fh.seek(prev)
+                    lines = fh.read().splitlines()
+                for line in lines[-3:]:
+                    ev, kv = git_event(r, ref, line)
+                    if ev:
+                        emit(ev, kv)
+            gi = r / ".gitignore"
+            try:
+                m = gi.stat().st_mtime
+            except OSError:
+                m = None
+            if m and gi in ign and m != ign[gi]:
+                emit("gitignore", {"repo": r.name})
+            ign[gi] = m
+            known.add(r)
+        time.sleep(3)
+
+
+def w_screenshare():
+    was = None
+    while True:
+        try:
+            nodes = json.loads(sh("pw-dump") or "[]")
+        except ValueError:
+            nodes = []
+        on = any(((o.get("info") or {}).get("props") or {}).get("media.class") == "Video/Source"
+                 and not str(((o.get("info") or {}).get("props") or {}).get("node.name", "")).startswith(("v4l2", "libcamera"))
+                 for o in nodes)
+        if on and was is False:
+            emit("screen-share")
+        was = on
+        time.sleep(3)
+
+
+def w_pactl():
+    sink = sh("pactl", "get-default-sink")
+    for line in stream(["pactl", "subscribe"]):
+        if "'new' on source-output" in line:
+            idx = int(line.rsplit("#", 1)[-1])
+            try:
+                outs = json.loads(sh("pactl", "-f", "json", "list", "source-outputs"))
+            except ValueError:
+                continue
+            o = next((x for x in outs if x.get("index") == idx), None)
+            if not o:
+                continue
+            p = o.get("properties", {})
+            app = p.get("application.name") or p.get("application.process.binary") or "SOMETHING"
+            if ("25Hz" in o.get("sample_specification", "") or "VolumeMeter" in app
+                    or "peak" in p.get("media.name", "").lower() or app.lower() in ("pavucontrol", "plasmashell")):
+                continue
+            emit("mic-on", {"app": app})
+        elif "'change' on server" in line:
+            s = sh("pactl", "get-default-sink")
+            if s and s != sink:
+                sink = s
+                try:
+                    desc = next((x.get("description") for x in json.loads(sh("pactl", "-f", "json", "list", "sinks"))
+                                 if x.get("name") == s), s)
+                except ValueError:
+                    desc = s
+                emit("audio-switch", {"device": desc})
+
+
+def w_udev():
+    names = {}
+    for line in stream(["udevadm", "monitor", "--udev", "--subsystem-match=usb", "--subsystem-match=drm"]):
+        m = re.match(r"UDEV\s+\[[\d.]+\]\s+(\w+)\s+(\S+)\s+\((\w+)\)", line)
+        if not m:
+            continue
+        action, path, sub = m.groups()
+        if just_resumed():
+            continue
+        if sub == "drm":
+            if action == "change":
+                emit("monitor-change")
+            continue
+        if not re.search(r"/\d+-[\d.]+$", path):
+            continue
+        if action == "add":
+            sp = Path("/sys" + path)
+            name = f"{rd(sp / 'manufacturer') or ''} {rd(sp / 'product') or ''}".strip() or "UNKNOWN ENTITY"
+            names[path] = name
+            emit("usb-yubikey" if "yubi" in name.lower() else "usb-in", {"device": name})
+        elif action == "remove":
+            emit("usb-out", {"device": names.pop(path, "UNKNOWN ENTITY")})
+
+
+def w_bt():
+    rx = re.compile(r"/org/bluez/hci\d+/dev_([0-9A-F_]+): org\.freedesktop\.DBus\.Properties\.PropertiesChanged "
+                    r"\('org\.bluez\.Device1', \{[^}]*'Connected': <(true|false)>")
+    for line in stream(["gdbus", "monitor", "--system", "--dest", "org.bluez"]):
+        m = rx.search(line)
+        if m:
+            mac = m.group(1).replace("_", ":")
+            a = re.search(r"Alias: (.+)", sh("bluetoothctl", "info", mac))
+            emit("bt-connect" if m.group(2) == "true" else "bt-disconnect",
+                 {"device": a.group(1) if a else mac})
+
+
+def active_conn():
+    for l in sh("nmcli", "-t", "-f", "NAME,TYPE", "connection", "show", "--active").splitlines():
+        name, _, typ = l.rpartition(":")
+        if "wireless" in typ or "ethernet" in typ:
+            return name.replace("\\:", ":")
+    return "the void"
+
+
+def w_nm():
+    state = sh("nmcli", "-t", "-f", "CONNECTIVITY", "general") or None
+    for line in stream(["nmcli", "monitor"]):
+        m = re.search(r"Connectivity is now '(\w+)'", line)
+        if not m or m.group(1) == state:
+            continue
+        prev, state = state, m.group(1)
+        if state == "full" and prev in ("none", "limited", "portal"):
+            emit("net-up", {"ssid": active_conn()})
+        elif state == "none":
+            emit("net-down")
+        elif state == "portal":
+            emit("net-portal", {"ssid": active_conn()})
+
+
+def w_mullvad():
+    if not shutil.which("mullvad"):
+        return time.sleep(86400)
+    last = None
+    for line in stream(["mullvad", "status", "listen"]):
+        l = line.strip()
+        st = ("up" if l.startswith("Connected") else "down" if l.startswith("Disconnected")
+              else "blocked" if l.lower().startswith(("blocked", "error")) else None)
+        if not st or st == last:
+            continue
+        first, last = last is None, st
+        if first:
+            continue
+        if st == "up":
+            info = sh("mullvad", "status", "-v")
+            relay = re.search(r"Relay:\s+(\S+)", info)
+            loc = re.search(r"Visible location:\s+(.+?)(\.|$)", info, re.M)
+            fr = re.search(r"\bfr-|France", info)
+            emit("vpn-france" if fr else "vpn-up", {"relay": relay.group(1) if relay else "?",
+                            "location": loc.group(1).strip() if loc else (relay.group(1) if relay else "SOMEWHERE")})
+        else:
+            emit("vpn-" + st)
+
+
+def w_ports():
+    def listening():
+        s = set()
+        for l in sh("ss", "-Hltn").splitlines():
+            m = re.search(r"(127\.0\.0\.1|0\.0\.0\.0|\*|\[::1?\]):(\d+)\s", l)
+            if m and 1024 <= int(m.group(2)) <= 9999:
+                s.add(int(m.group(2)))
+        return s
+    seen = listening()
+    while True:
+        time.sleep(3)
+        now = listening()
+        for p in sorted(now - seen):
+            emit("port", {"port": p})
+        for p in sorted(seen - now):
+            emit("port-close", {"port": p})
+        seen = now
+
+
+PARTIAL = (".crdownload", ".part", ".tmp", ".download", ".partial")
+SUS = {".exe", ".msi", ".dll", ".scr", ".bat", ".cmd", ".ps1", ".vbs", ".apk", ".jar", ".sh", ".appimage",
+       ".deb", ".rpm", ".bin", ".elf", ".iso", ".img", ".lnk", ".hta", ".msix", ".dmg"}
+
+
+def w_files():
+    dl, shots = HOME / "Downloads", HOME / "Pictures/Screenshots"
+
+    def ls(d):
+        try:
+            return {e.name for e in os.scandir(d)}
+        except OSError:
+            return set()
+    seen_dl, seen_ss = ls(dl), ls(shots)
+    while True:
+        time.sleep(2)
+        now = ls(dl)
+        for n in sorted(now - seen_dl):
+            if n.startswith(".") or n.lower().endswith(PARTIAL):
+                continue
+            ext = Path(n).suffix.lower()
+            emit("apk" if ext in (".apk", ".xapk", ".apks") else "download-sus" if ext in SUS else "download",
+                 {"file": n[:60]})
+        seen_dl = now
+        now = ls(shots)
+        if now - seen_ss:
+            emit("screenshot")
+        seen_ss = now
+
+
+SECRET = C(r"(sk-ant-[\w-]{20,}|sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_\w{30,}|"
+           r"AKIA[0-9A-Z]{16}|xox[abpr]-[\w-]{10,}|hf_[A-Za-z0-9]{30,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|"
+           r"eyJ[\w-]{10,}\.eyJ[\w-]{10,}\.[\w-]{10,}|AIza[0-9A-Za-z_-]{35})")
+SHELLCODE = C(r"(\\x[0-9a-fA-F]{2}){8,}")
+CURSED = C(r"rm\s+-rf\s+/(\s|$|\*)|:\(\)\s*\{\s*:\|:&\s*\};:|--no-preserve-root|mkfs\.\w+\s+/dev/[sn]")
+
+
+def w_clip():
+    last = None
+    while True:
+        time.sleep(1.5)
+        r = subprocess.run(["qdbus6", "org.kde.klipper", "/klipper", "org.kde.klipper.klipper.getClipboardContents"],
+                           capture_output=True, text=True)
+        if r.returncode:
+            time.sleep(30); continue
+        h = hash(r.stdout)
+        if h == last:
+            continue
+        first, last = last is None, h
+        if first:
+            continue
+        t = r.stdout
+        if SECRET.search(t):
+            emit("clip-secret")
+        elif SHELLCODE.search(t):
+            emit("clip-shellcode")
+        elif CURSED.search(t):
+            emit("clip-cursed")
+
+
+SITE_RULES = [(ev, C(rx, re.I)) for ev, rx in [
+    ("site-pointnemo", r"point.?nemo"),
+    ("site-hypixel", r"hypixel"),
+    ("site-crypto", r"dexscreener|pump\.fun|gmgn\.ai|photon-sol|birdeye\.so|coingecko|coinmarketcap|binance\.com|bullx"),
+    ("site-runescape", r"runescape|osrs|oldschool\.runescape"),
+    ("site-tiktok", r"tiktok\.com"),
+    ("site-underworld", r"hackforums|breachforums|nulled\.to|cracked\.io|xss\.is|exploit\.in|leakbase|doxbin"),
+    ("site-exploit", r"exploit-db\.com|packetstorm|cve\.mitre\.org|nvd\.nist\.gov|hackerone\.com|vulners\.com|0day"),
+    ("site-nuke", r"nuclear|nuke|uranium|plutonium|tsar.bomba|manhattan.project|\bicbm\b|chernobyl|radiation"),
+    ("site-chatgpt", r"chatgpt\.com|chat\.openai\.com|gemini\.google\.com|grok\.com|perplexity\.ai|copilot\.microsoft"),
+    ("site-claude", r"claude\.ai|anthropic\.com"),
+    ("site-stackoverflow", r"stackoverflow\.com|stackexchange\.com"),
+    ("site-github", r"github\.com"),
+    ("site-spotify", r"open\.spotify\.com"),
+]]
+
+
+def w_chrome():
+    import sqlite3
+    tmp, last = RUN / "history.db", {}
+    while True:
+        for h in (HOME / ".config/google-chrome").glob("*/History"):
+            try:
+                shutil.copyfile(h, tmp)
+                con = sqlite3.connect(f"file:{tmp}?mode=ro", uri=True)
+                if h not in last:
+                    last[h] = con.execute("select max(visit_time) from visits").fetchone()[0] or 0
+                    rows = []
+                else:
+                    rows = con.execute("select u.url, v.visit_time from visits v join urls u on u.id=v.url "
+                                       "where v.visit_time>? order by v.visit_time", (last[h],)).fetchall()
+                con.close()
+            except (OSError, sqlite3.Error):
+                continue
+            for url, vt in rows:
+                last[h] = max(last[h], vt)
+                ev = next((e for e, rx in SITE_RULES if rx.search(url)), None)
+                if ev in ("site-runescape", "site-tiktok"):
+                    t = time.localtime()
+                    if t.tm_wday < 5 and 10 <= t.tm_hour < 17:
+                        ev = "unemployed"
+                if ev:
+                    emit(ev, {"hour": time.strftime("%H")})
+        time.sleep(20)
+
+
+WATCHERS = [w_notifications, w_logind, w_screensaver, w_idle, w_power, w_resources, w_clock, w_journal,
+            w_units, w_apt, w_procs, w_cam, w_pactl, w_udev, w_bt, w_nm, w_mullvad, w_ports, w_files,
+            w_clip, w_chrome, w_screenshare, w_git]
+
+
+def run_forever(fn):
+    while True:
+        try:
+            fn()
+        except Exception as e:  # keep every watcher alive no matter what
+            log(f"ERR {fn.__name__}: {e!r}")
+        time.sleep(5)
+
+
+# ───────────────────────── shell hook ─────────────────────────
+SHELL_RULES = [(ev, C(rx)) for ev, rx in [
+    ("opsec", r"\bapt(-get)?\s+install\b.*\bopsec\b"),
+    ("rm-root", r"--no-preserve-ro|\brm\s+-\w*[rR]\w*\s+(-\w+\s+)*/(\*)?(\s|$)"),
+    ("git-force-push", r"\bgit\s+push\b.*\s(-f|--force|--force-with-lease)\b"),
+    ("git-push-main", r"\bgit\s+push\b.*\b(main|master)\b"),
+    ("git-push", r"\bgit\s+push\b"),
+    ("git-diff", r"\bgit\s+diff\b"),
+    ("release", r"\bgit\s+tag\s+(-a\s+|-s\s+)?v?\d|\bgh\s+release\s+create\b"),
+    ("gitignore", r"\.gitignore\b"),
+    ("apk", r"^\s*(apktool|jadx|jadx-gui|apksigner|zipalign)\b|\badb\s+install\b"),
+    ("adb", r"(^|[\s;|&/])(adb|scrcpy)(\s|$)|\$A\s"),
+    ("electron", r"\b(npm|pnpm|yarn|bun)\s+(i|add|install)\b.*\belectron\b"),
+    ("git-reset-hard", r"\bgit\s+reset\b.*--hard"),
+    ("git-commit", r"\bgit\s+commit\b"),
+    ("git-clone", r"\bgit\s+clone\b"),
+    ("rm-rf", r"\brm\s+(-\w*[rR]\w*|--recursive)\b"),
+    ("chmod-777", r"\bchmod\s+(-R\s+)?0?777\b"),
+    ("curl-pipe-sh", r"\b(curl|wget)\b.*\|\s*(sudo\s+)?(ba|z)?sh\b"),
+    ("break-system", r"--break-system-packages"),
+    ("kill", r"\b(kill\s+-(9|KILL)|pkill|killall)\b"),
+    ("hexdump", r"^\s*(xxd|hexdump|objdump|readelf|strings|binwalk|nm)\b"),
+    ("crypto", r"^\s*(gpg|openssl|age|cryptsetup|veracrypt)\b"),
+    ("ssh-out", r"^\s*(ssh|mosh)\s"),
+    ("deps-install", r"\b(npm\s+(i|install)|pnpm\s+(i|add|install)|yarn\s+add|pip3?\s+install|uv\s+(pip\s+install|add)"
+                     r"|cargo\s+install|gem\s+install)\b"),
+    ("build", r"^\s*(make|cmake|ninja|cargo\s+(build|run)|gcc|g\+\+|clang|go\s+build|npm\s+run\s+build)\b"),
+    ("sudo", r"^\s*sudo\s"),
+]]
+FAILABLE = {"git-push", "git-push-main", "git-clone", "deps-install", "ssh-out"}
+INTERACTIVE = {"vim", "nvim", "nano", "less", "more", "man", "htop", "btop", "top", "ssh", "mosh", "claude",
+               "python", "python3", "ipython", "node", "tmux", "screen", "watch", "tail", "journalctl", "kate",
+               "gdb", "r2", "msfconsole", "mpv", "ffplay", "nemo", "sudo", "su", "zsh", "bash", "fg"}
+
+
+def shell(ec, secs, cmd):
+    ec, secs, c = int(ec), int(float(secs or 0)), cmd.strip()
+    first = (c.split() or [""])[0]
+    if not c or first == "nemo" or ec in (130, 148):  # Ctrl-C / Ctrl-Z are not failures
+        return
+    if ec == 127:
+        return emit("cmd-notfound", {"cmd": first[:40]})
+    if ec == 139:
+        return emit("segfault", {"cmd": first[:40]})
+    for ev, rx in SHELL_RULES:
+        if rx.search(c):
+            if ev == "build":
+                ev = "build-ok" if ec == 0 else "build-fail"
+            elif ev == "git-push" and not ec and sh("git", "rev-parse", "--abbrev-ref", "HEAD") in ("main", "master"):
+                ev = "git-push-main"
+            if ec and ev in FAILABLE:
+                ev = "git-push-fail" if ev.startswith("git-push") else ev + "-fail"
+            if ev == "rm-root":  # the OPSEC Angel answers
+                emit(ev, {"cmd": first[:40]}, block=True)
+                return emit("opsec")
+            return emit(ev, {"cmd": first[:40], "app": first[:40], "code": ec, "secs": secs, "mins": secs // 60,
+                             "branch": sh("git", "rev-parse", "--abbrev-ref", "HEAD") or "main",
+                             "repo": Path(sh("git", "rev-parse", "--show-toplevel") or os.getcwd()).name})
+    if ec:
+        return emit("cmd-fail", {"cmd": first[:40], "code": ec})
+    if secs >= 120 and first not in INTERACTIVE:
+        emit("cmd-long", {"cmd": first[:40], "mins": secs // 60, "secs": secs})
+
+
+# ───────────────────────── CLI ─────────────────────────
+def daemon():
+    sync_conf()
+    for ev in list(EVENTS) + ["_default"] + sorted({family(e) for e in EVENTS}):
+        (SOUNDS / ev).mkdir(parents=True, exist_ok=True)
+    if LOG.exists() and LOG.stat().st_size > 2_000_000:
+        LOG.write_text("")
+
+    def on_term(*_):
+        if not S["shutting"] and sh("systemctl", "--user", "is-system-running") == "stopping":
+            emit("logout", block=True)
+        os._exit(0)
+    signal.signal(signal.SIGTERM, on_term)
+
+    for fn in WATCHERS:
+        threading.Thread(target=run_forever, args=(fn,), daemon=True, name=fn.__name__).start()
+    log("daemon started")
+    marker = RUN / "logged-in"
+    if not marker.exists():  # first start this login session (not a mere restart)
+        RUN.mkdir(parents=True, exist_ok=True); marker.touch()
+        time.sleep(3)
+        kf, kern = LOG.parent / "kernel", os.uname().release
+        old = rd(kf)
+        kf.write_text(kern)
+        if old and old != kern:
+            emit("kernel-new", {"kernel": kern}, priority=True)
+        else:
+            emit("login", priority=True)
+        t = time.localtime()
+        if t.tm_wday == 4 and t.tm_mday == 13:
+            time.sleep(4); emit("friday-13")
+    while True:
+        time.sleep(3600)
+
+
+def kv_args(args):
+    return dict(a.split("=", 1) for a in args if "=" in a)
+
+
+def main():
+    a = sys.argv[1:]
+    cmd = a[0] if a else "help"
+    if cmd == "daemon":
+        daemon()
+    elif cmd in ("emit", "test") and len(a) > 1:
+        emit(a[1], kv_args(a[2:]), force=cmd == "test", block=True)
+    elif cmd == "shell" and len(a) >= 4:
+        shell(a[1], a[2], " ".join(a[3:]))
+    elif cmd == "vol":  # same slider as the mixer's Applications tab
+        def find():
+            return next((x for x in json.loads(sh("pactl", "-f", "json", "list", "sink-inputs") or "[]")
+                         if x.get("properties", {}).get("application.name") == "Point Nemo"), None)
+        x = find()
+        if not x:
+            return print("Point Nemo audio server is not running (systemctl --user restart point-nemo-bus)")
+        if len(a) > 1:
+            subprocess.run(["pactl", "set-sink-input-volume", str(x["index"]), a[1].rstrip("%") + "%"])
+            x = find()
+        v = next(iter(x["volume"].values()))["value_percent"]
+        print(f"Point Nemo volume: {v}")
+    elif cmd == "mute":
+        RUN.mkdir(parents=True, exist_ok=True)
+        mins = float(a[1]) if len(a) > 1 else 60
+        MUTE.write_text(str(time.time() + mins * 60)); print(f"muted for {mins:g} min")
+    elif cmd == "unmute":
+        MUTE.unlink(missing_ok=True); print("unmuted")
+    elif cmd == "log":
+        os.execvp("tail", ["tail", "-n", "30", "-F", str(LOG)])
+    elif cmd == "list":
+        sync_conf()
+        print(f"{'EVENT':20} {'POPUP':5} {'CD':>5}  {'SOUND SOURCE':24} QUOTES")
+        for ev in EVENTS:
+            m, f = meta(ev), pick_sound(ev)
+            src = "OFF" if not m["sound"] else (f.parent.name + "/" if f else "-")
+            qf = next((p for p in (QUOTES / f"{ev}.txt", QUOTES / f"{family(ev)}.txt") if p.exists()), None)
+            nq = len([l for l in qf.read_text().splitlines() if l.strip()]) if qf else 0
+            flag = "" if m["enabled"] else "  [DISABLED]"
+            print(f"{ev:20} {'yes' if m['popup'] else 'no':5} {m['cooldown']:>5}  {src:24} {nq}{flag}")
+    else:
+        print(__doc__)
+
+
+if __name__ == "__main__":
+    main()

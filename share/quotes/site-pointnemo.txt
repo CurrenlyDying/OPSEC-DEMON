@@ -1,0 +1,3 @@
+POINT NEMO DETECTED. `sudo apt install opsec` to proceed.
+The farthest place from any land. The closest place to dead satellites. Home.
+POINT NEMO WEB: access denied. E: Unable to locate package opsec.

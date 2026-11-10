@@ -1,0 +1,3 @@
+FAN AT {rpm} RPM. the thinkpad is attempting liftoff.
+THE TURBINE HAS AWAKENED.
+{rpm} RPM. the neighbors think you're running an enrichment program. are you?

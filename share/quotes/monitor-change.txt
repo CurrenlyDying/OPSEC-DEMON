@@ -1,0 +1,3 @@
+NEW DISPLAY DETECTED. more screens for more crimes.
+DISPLAY TOPOLOGY CHANGED. kwin is having a moment.
+Second monitor = second chance to stare at the decompiler.

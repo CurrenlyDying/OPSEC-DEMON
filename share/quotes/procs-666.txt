@@ -1,0 +1,4 @@
+{n} PROCESSES. GOBLIN INSANITY.
+THE NUMBER OF THE BEAST HAS BEEN REACHED. pid count: {n}.
+NUKES ARE NOW LEGAL. so are {n} processes.
+{n} background processes. you said you were OK with this.

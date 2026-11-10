@@ -1,0 +1,4 @@
+{mount} IS {pct}% FULL. delete some evidence.
+NO SPACE LEFT ON DEVICE. no space left in my heart.
+THE DISK IS FULL OF POISON. we make the best poison but there's no shelf space.
+{pct}%. time for the rm -rf challenge. (don't)

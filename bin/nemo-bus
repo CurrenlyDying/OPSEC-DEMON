@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""POINT NEMO audio server.
+
+Keeps ONE always-open playback stream called "Point Nemo", so it sits in the
+Plasma volume mixer's Applications tab with its own slider (WirePlumber remembers
+its volume). Clips are decoded with ffmpeg and mixed into that stream; silence
+in between.
+
+Play a clip:  send its path as a datagram to $XDG_RUNTIME_DIR/point-nemo/bus.sock
+"""
+import os, socket, subprocess, threading, time
+from pathlib import Path
+
+import numpy as np
+
+RATE, CH, CHUNK = 48000, 2, 960  # 20 ms
+RUN = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "point-nemo"
+SOCK = RUN / "bus.sock"
+NAME = "Point Nemo"
+
+voices, lock = [], threading.Lock()  # each voice: [int16 array (n, 2), position]
+
+
+def decode(path):
+    raw = subprocess.run(["ffmpeg", "-v", "quiet", "-i", path, "-f", "s16le", "-ac", str(CH), "-ar", str(RATE), "-"],
+                         capture_output=True).stdout
+    return np.frombuffer(raw, dtype=np.int16).reshape(-1, CH)
+
+
+def listener():
+    RUN.mkdir(parents=True, exist_ok=True)
+    SOCK.unlink(missing_ok=True)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    s.bind(str(SOCK))
+    while True:
+        path = s.recv(4096).decode(errors="replace").strip()
+        try:
+            pcm = decode(path)
+        except Exception:
+            continue
+        if len(pcm):
+            with lock:
+                voices.append([pcm, 0])
+
+
+def main():
+    threading.Thread(target=listener, daemon=True).start()
+    out = subprocess.Popen(["pacat", "--playback", "--raw", "--format=s16le", f"--rate={RATE}", f"--channels={CH}",
+                            f"--client-name={NAME}", f"--stream-name={NAME}", "--latency-msec=60",
+                            f"--property=application.name={NAME}",
+                            "--property=application.icon_name=dialog-warning"], stdin=subprocess.PIPE)
+    import fcntl
+    fcntl.fcntl(out.stdin.fileno(), 1031, 4096)  # F_SETPIPE_SZ: keep the pipe tiny so clips start fast
+    silence = np.zeros((CHUNK, CH), dtype=np.int16).tobytes()
+    while True:
+        with lock:
+            active = list(voices)
+        if not active:
+            buf = silence
+        else:
+            mix = np.zeros((CHUNK, CH), dtype=np.int32)
+            with lock:
+                for v in voices:
+                    part = v[0][v[1]:v[1] + CHUNK]
+                    mix[:len(part)] += part
+                    v[1] += CHUNK
+                voices[:] = [v for v in voices if v[1] < len(v[0])]
+            buf = np.clip(mix, -32768, 32767).astype(np.int16).tobytes()
+        out.stdin.write(buf)  # pacat blocks when its buffer is full: this paces the loop in real time
+        out.stdin.flush()
+        if out.poll() is not None:
+            raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,4 @@
+TYPING DUMB AS FUCK. ({cmd})
+'{cmd}' does not exist. neither does POINT NEMO WEB.
+{cmd}: command not found. try `sudo apt install opsec` instead.
+Not a command. Not a spell. Not anything.

@@ -1,0 +1,5 @@
+There's a nuke in this file. ({file})
+IM IN THE FREE MARKET. just bought {file}.
+{file} DOWNLOADED. open it in ghidra, not in your heart.
+You should really follow the instructions on the box. (the box is {file})
+Executable acquired. the shadow government says: run it in a VM.

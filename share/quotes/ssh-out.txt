@@ -1,0 +1,2 @@
+Returned from the remote machine. what did you see there.
+SSH SESSION OVER. leave no trace. (check .bash_history)

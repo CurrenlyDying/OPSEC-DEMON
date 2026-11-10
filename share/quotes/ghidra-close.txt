@@ -1,0 +1,3 @@
+GHIDRA CLOSED. the binary will remember what you did.
+Analysis complete. or abandoned. same thing.
+The decompiler sleeps. undefined4 rests in peace.

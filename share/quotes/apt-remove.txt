@@ -1,0 +1,3 @@
+{pkgs} HAS BEEN EXILED.
+REMOVED: {pkgs}. aliens have died.
+Purge complete. the goblins are pleased.

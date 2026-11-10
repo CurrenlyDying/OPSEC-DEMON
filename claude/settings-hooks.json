@@ -1,0 +1,136 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/nemo emit cc-start >/dev/null 2>&1",
+            "async": true,
+            "timeout": 10
+          }
+        ],
+        "matcher": "startup"
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/nemo emit cc-resume >/dev/null 2>&1",
+            "async": true,
+            "timeout": 10
+          }
+        ],
+        "matcher": "resume"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/nemo emit cc-done >/dev/null 2>&1",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/nemo emit cc-permission >/dev/null 2>&1",
+            "async": true,
+            "timeout": 10
+          }
+        ],
+        "matcher": "permission_prompt"
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/nemo emit cc-waiting >/dev/null 2>&1",
+            "async": true,
+            "timeout": 10
+          }
+        ],
+        "matcher": "idle_prompt"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/nemo emit cc-tool-fail >/dev/null 2>&1",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/nemo emit cc-denied >/dev/null 2>&1",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/nemo emit cc-compact >/dev/null 2>&1",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/nemo emit cc-agent >/dev/null 2>&1",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/nemo emit cc-error >/dev/null 2>&1",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.local/bin/nemo emit cc-end >/dev/null 2>&1",
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

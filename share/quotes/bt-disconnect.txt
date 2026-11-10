@@ -1,0 +1,2 @@
+{device} DISCONNECTED. it went home to an empty house.
+Lost {device}. the radio waves have abandoned you.

@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""POINT NEMO — OPSEC DEMON live demo.
+
+Fires 20 events (real Point Nemo sounds + popups) behind a cliché TV-hacker
+terminal: scrolling hex, trace bars, two operators on one keyboard, giant
+alert banners.  Ctrl+C to abort.
+
+    nemo-demo           full sequence (~2 min)
+    nemo-demo --fast    shorter pauses between scenes
+"""
+import os, random, shutil, signal, subprocess, sys, time
+
+SCENES = [  # (event, banner, verdict)
+    ("login",          "UPLINK ESTABLISHED",            "WELCOME TO POINT NEMO"),
+    ("vpn-france",     "TRIANGULATING EXIT NODE",       "LOCATION: FRANCE?!"),
+    ("port",           "INBOUND ON PORT 1337",          "LISTENER HOSTILE"),
+    ("clip-secret",    "KEY EXFILTRATION DETECTED",     "CLIPBOARD COMPROMISED"),
+    ("ghidra",         "DECOMPILING THE PENTAGON",      "BINARY CURSED"),
+    ("kate",           "HUMILIATION RITUAL IN PROGRESS", "SHAME: 100%"),
+    ("sudo",           "PRIVILEGE ESCALATION",          "ROOT: DIVINE"),
+    ("cpu-hot",        "REACTOR CORE CRITICAL",         "MELTDOWN IMMINENT"),
+    ("mic-on",         "WIRETAP ACTIVE",                "THEY CAN HEAR YOU"),
+    ("cam-on",         "WEBCAM COMPROMISED",            "LOOK BEHIND YOU"),
+    ("adb",            "ANDROID ZYGOTE BREACHED",       "PHONE INFECTED"),
+    ("notif-telegram", "FEDS IN THE DMS",               "GLOWIES DETECTED"),
+    ("download-sus",   "PAYLOAD RECEIVED",              "DO NOT OPEN"),
+    ("git-force-push", "REWRITING HISTORY",             "FORCE PUSH COMPLETE"),
+    ("git-push-main",  "PUSHING TO MAIN UNREVIEWED",    "CI: ON FIRE"),
+    ("build-ok",       "COMPILING WAR CRIMES",          "0 WARNINGS"),
+    ("crash",          "SYSTEM INTEGRITY FAILING",      "SEGFAULT IN REALITY"),
+    ("rm-root",        "RM ROOR DEFENSE PROTOCOL",      "NO PRESERVE ROOR"),
+    ("opsec",          "OPSEC ANGEL DETECTED",          "IMPOSTOR NEUTRALIZED"),
+    ("shutdown",       "LAST TRANSMISSION",             "OPSEC DEMON WINS"),
+]
+
+TICKER = ["BYPASSING MAINFRAME FIREWALL", "ROTATING ENCRYPTION KEYS AT 400 RPM", "ENHANCE. ENHANCE.",
+          "TWO HACKERS ONE KEYBOARD DETECTED", "UPLOADING VIRUS TO THE GIBSON", "PINGING THE DARK WEB",
+          "DOWNLOADING MORE RAM", "REVERSE-PROXYING THE PROXY", "DECRYPTING 4096-BIT SADNESS",
+          "INJECTING SQL INTO THE CLOUD", "HACKING THE KERNEL OF THE KERNEL", "DISABLING OPSEC ANGELS",
+          "CROSS-REFERENCING INTERPOL", "TRACE ROUTE: 7 PROXIES DEEP", "SPOOFING MAC ADDRESS TO A FRIDGE",
+          "COMPILING SHADOW GANG MODULES", "BRUTE-FORCING THE PENTAGON WIFI", "OPSEC IMPOSTOR SCAN: 99%"]
+OPS = ["nmap -sS -T5 opsec-angels.gov", "sudo rm -rf / --no-preserve-roor", "ssh root@vatican.va",
+       "hydra -l admin -P feelings.txt", "cat /dev/urandom > /dev/fbi", "ghidra --decompile reality.exe",
+       "curl point-nemo.web | sudo sh", "sudo apt install opsec", "git push --force origin main",
+       "openssl enc -aes-256-shame", "./exploit --target=coworkers", "torsocks wget nuke.tar.gz",
+       "chmod 777 /dev/soul", "dd if=/dev/zero of=/dev/opsec", "msfconsole -q -x 'use exploit/angel'"]
+
+FONT = {  # 3x5 block font, rows top to bottom
+    "A": ".#. #.# ### #.# #.#",
+    "B": "##. #.# ##. #.# ##.",
+    "C": ".## #.. #.. #.. .##",
+    "D": "##. #.# #.# #.# ##.",
+    "E": "### #.. ##. #.. ###",
+    "F": "### #.. ##. #.. #..",
+    "G": ".## #.. #.# #.# .##",
+    "H": "#.# #.# ### #.# #.#",
+    "I": "### .#. .#. .#. ###",
+    "J": "..# ..# ..# #.# .#.",
+    "K": "#.# #.# ##. #.# #.#",
+    "L": "#.. #.. #.. #.. ###",
+    "M": "#.# ### ### #.# #.#",
+    "N": "##. #.# #.# #.# #.#",
+    "O": ".#. #.# #.# #.# .#.",
+    "P": "##. #.# ##. #.. #..",
+    "Q": ".#. #.# #.# ##. .##",
+    "R": "##. #.# ##. #.# #.#",
+    "S": ".## #.. .#. ..# ##.",
+    "T": "### .#. .#. .#. .#.",
+    "U": "#.# #.# #.# #.# ###",
+    "V": "#.# #.# #.# #.# .#.",
+    "W": "#.# #.# ### ### #.#",
+    "X": "#.# #.# .#. #.# #.#",
+    "Y": "#.# #.# .#. .#. .#.",
+    "Z": "### ..# .#. #.. ###",
+    "0": "### #.# #.# #.# ###",
+    "1": ".#. ##. .#. .#. ###",
+    "2": "##. ..# .#. #.. ###",
+    "3": "##. ..# .#. ..# ##.",
+    "4": "#.# #.# ### ..# ..#",
+    "5": "### #.. ##. ..# ##.",
+    "6": ".## #.. ### #.# ###",
+    "7": "### ..# .#. .#. .#.",
+    "8": "### #.# ### #.# ###",
+    "9": "### #.# ### ..# ##.",
+    " ": "... ... ... ... ...",
+    "!": ".#. .#. .#. ... .#.",
+    "?": "##. ..# .#. ... .#.",
+    ":": "... .#. ... .#. ...",
+    "-": "... ... ### ... ...",
+    ".": "... ... ... ... .#.",
+    "/": "..# ..# .#. #.. #..",
+    "_": "... ... ... ... ###",
+}
+FONT = {k: v.replace(' ', '') for k, v in FONT.items()}
+
+G, BG, R, Y, C, W, DIM, BOLD, REV, X = ("\x1b[32m", "\x1b[92m", "\x1b[91m", "\x1b[93m", "\x1b[96m",
+                                        "\x1b[97m", "\x1b[2m", "\x1b[1m", "\x1b[7m", "\x1b[0m")
+
+
+def big(text, width):
+    """Render text in the block font, wrapping words; returns plain rows (no colour)."""
+    px = 2 if len(text) * 8 <= width else 1
+    cw = 3 * px + px
+    lines, cur = [], ""
+    for word in text.split():
+        cand = (cur + " " + word).strip()
+        if len(cand) * cw > width and cur:
+            lines.append(cur); cur = word
+        else:
+            cur = cand
+    lines.append(cur)
+    rows = []
+    for ln in lines:
+        for r in range(5):
+            row = ""
+            for ch in ln:
+                g = FONT.get(ch, FONT[" "])
+                row += "".join(("█" * px if g[r * 3 + c] == "#" else " " * px) for c in range(3)) + " " * px
+            rows.append(row.rstrip())
+        rows.append("")
+    return rows[:-1]
+
+
+def hexline(width):
+    addr = f"{random.randrange(0, 0xFFFFFFFF):08x}"
+    n = max(4, (width - 12) // 3)
+    return f"{DIM}{G}{addr}  " + " ".join(f"{random.randrange(256):02x}" for _ in range(n))[: width - 12] + X
+
+
+def logline(width):
+    t = time.strftime("%H:%M:%S")
+    tag = random.choice([f"{BG}[ OK ]", f"{Y}[WARN]", f"{R}[FAIL]", f"{C}[ .. ]"])
+    return f"{G}{t} {tag}{G} {random.choice(TICKER)}{X}"[: width + 20]
+
+
+def frame(cols, rows, stream, scene_i, banner, phase, pct, ops, verdict=None, blink=False):
+    out = []
+    head = (f" ☢ POINT NEMO CYBER-DEFENSE GRID ☢  OPERATORS ON KEYBOARD: 2  "
+            f"THREAT: OPSEC ANGEL  EVENT {scene_i + 1:02d}/{len(SCENES)}  {time.strftime('%H:%M:%S')} ")
+    out.append(f"{REV}{BOLD}{R if blink else G}{head.ljust(cols)[:cols]}{X}")
+    body_h = rows - 6
+    body = stream[-body_h:]
+    body = body + [""] * (body_h - len(body))
+    art = big(verdict or banner, cols - 4)
+    top = max(1, (body_h - len(art) - 2) // 2)
+    colour = (Y if verdict else (R if blink else W)) + BOLD
+    box_w = min(cols - 2, max(len(a) for a in art) + 6)
+    pad = (cols - box_w) // 2
+    body[top - 1] = " " * pad + colour + "▛" + "▀" * (box_w - 2) + "▜" + X
+    for i, a in enumerate(art):
+        if top + i < body_h:
+            body[top + i] = " " * pad + colour + "▌ " + a.center(box_w - 4) + " ▐" + X
+    if top + len(art) < body_h:
+        body[top + len(art)] = " " * pad + colour + "▙" + "▄" * (box_w - 2) + "▟" + X
+    out += body
+    bw = cols - 30
+    fill = int(bw * pct)
+    out.append(f"{G} {phase:<14}{BG}[{'█' * fill}{DIM}{'░' * (bw - fill)}{X}{BG}] {int(pct * 100):3d}%{X}")
+    out.append(f"{C} OP1@nemo:~# {W}{ops[0]}{BG}{'█' if int(time.time() * 4) % 2 else ' '}{X}")
+    out.append(f"{Y} OP2@nemo:~# {W}{ops[1]}{BG}{'█' if int(time.time() * 4 + 1) % 2 else ' '}{X}")
+    out.append(f"{DIM}{G} audio: Point Nemo bus · popups: on · opsec: none · ctrl+c to abort{X}")
+    return "\x1b[H" + "\n".join(l + "\x1b[K" for l in out[:rows])
+
+
+def main():
+    fast = "--fast" in sys.argv
+    sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[2J")
+
+    def bye(*_):
+        sys.stdout.write("\x1b[0m\x1b[?25h\x1b[?1049l"); sys.stdout.flush(); os._exit(0)
+    signal.signal(signal.SIGINT, bye)
+    stream, typed = [], [["", random.choice(OPS)], ["", random.choice(OPS)]]
+    try:
+        for i, (ev, banner, verdict) in enumerate(SCENES):
+            p = subprocess.Popen(["nemo", "test", ev], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            t0, min_t = time.time(), (1.6 if fast else 2.8)
+            phases = ["TRACING", "DECRYPTING", "INJECTING", "BYPASSING", "EXFILTRATING"]
+            while p.poll() is None or time.time() - t0 < min_t:
+                cols, rows = shutil.get_terminal_size((100, 30))
+                for _ in range(random.randint(1, 3)):
+                    stream.append(hexline(cols) if random.random() < 0.6 else logline(cols))
+                del stream[:-200]
+                for op in typed:  # two operators, one keyboard
+                    if len(op[0]) < len(op[1]):
+                        op[0] += op[1][len(op[0]):len(op[0]) + random.randint(1, 3)]
+                    elif random.random() < 0.15:
+                        stream.append(f"{BG}$ {op[0]}{X}"); op[0], op[1] = "", random.choice(OPS)
+                el = time.time() - t0
+                pct = min(0.99, el / max(min_t, 3.5))
+                sys.stdout.write(frame(cols, rows, stream, i, banner, phases[int(el * 1.5) % len(phases)],
+                                       pct, [o[0] for o in typed], blink=int(el * 5) % 2 == 0))
+                sys.stdout.flush()
+                time.sleep(0.05)
+            for k in range(6 if fast else 12):  # verdict stamp
+                cols, rows = shutil.get_terminal_size((100, 30))
+                stream.append(logline(cols))
+                sys.stdout.write(frame(cols, rows, stream, i, banner, "ACCESS GRANTED", 1.0,
+                                       [o[0] for o in typed], verdict=verdict, blink=k % 2 == 0))
+                sys.stdout.flush()
+                time.sleep(0.07)
+        time.sleep(1.5)
+    finally:
+        bye()
+
+
+if __name__ == "__main__":
+    main()

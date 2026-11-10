@@ -1,0 +1,4 @@
+I HAVE CONSUMED. NOW I WILL BECOME FREE. ({pct}% RAM)
+{pct}% RAM USED. chrome has opened a portal.
+64 GB was supposed to be enough. it was not enough.
+THE OOM KILLER IS SHARPENING HIS KNIFE.

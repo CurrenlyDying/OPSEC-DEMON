@@ -1,0 +1,4 @@
+You should really follow the instructions on the box.
+BUILD FAILED. the compiler has rejected your offering.
+error: everything. The system is unfair.
+What the fuck. (847 errors, 1 warning)
